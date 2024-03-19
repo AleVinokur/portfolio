@@ -1,0 +1,68 @@
+# Definition file for Bitbucket Pipeline
+definitions:
+  steps:
+    - step: &build-test
+        name: Build & Test
+        image: composer:2.0
+        caches:
+          - composer
+        script:
+          - apk add --no-cache libpng libpng-dev
+          - docker-php-ext-install pdo_mysql gd
+          - composer install
+          - mv .env.pipelines .env
+          - php artisan key:generate
+          - php artisan migrate
+          - php artisan db:seed
+          - php artisan serve &
+          - sleep 3
+          - ./vendor/bin/phpunit
+          - curl -vk http://localhost:8000
+        services:
+          - mysql
+        artifacts:
+          - vendor/**
+    - step: &deploy
+        name: Deploy
+        image: itrocksweb/aws-doppler-cli
+        services:
+          - docker
+        caches:
+          - docker
+        script:
+          - doppler secrets download --no-file --format env > .env
+          - echo "APP_VERSION=1.1.$BITBUCKET_BUILD_NUMBER" >> .env
+          - docker build --build-arg uid=1000 -t app:latest .
+          - aws configure set aws_access_key_id "${AWS_ACCESS_KEY_ID}"
+          - aws configure set aws_secret_access_key "${AWS_SECRET_ACCESS_KEY}"
+          - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_URL
+          - docker tag app:latest $ECR_URL/$ECR_REPOSITORY:latest
+          - docker tag app:latest $ECR_URL/$ECR_REPOSITORY:$BITBUCKET_BUILD_NUMBER
+          - docker push $ECR_URL/$ECR_REPOSITORY:latest
+          - docker push $ECR_URL/$ECR_REPOSITORY:$BITBUCKET_BUILD_NUMBER
+          - aws ecs update-service --cluster $ECS_CLUSTER_NAME --service $ECS_SERVICE_NAME --force-new-deployment --region $AWS_DEFAULT_REGION
+
+pipelines:
+  branches:
+    default:
+      - step: *build-test
+    development:
+      - step: *build-test
+      - step:
+          <<: *deploy
+          deployment: test
+    master:
+      - step: *build-test
+      - step:
+          <<: *deploy
+          deployment: production
+
+definitions:
+  services:
+    mysql:
+      image: mysql:8
+      environment:
+        MYSQL_DATABASE: 'pipelinedb'
+        MYSQL_RANDOM_ROOT_PASSWORD: 'yes'
+        MYSQL_USER: 'user'
+        MYSQL_PASSWORD: 'password'
